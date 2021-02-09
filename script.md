@@ -220,6 +220,7 @@ handler :: CreateAccountRequest -> Validation [HandlerError] (IO ())
 handler request = do
   uname <- castUNError $ createUsername $ username request
   pwd <- castPError $ createPassword $ password request
+  -- пропустим хэширование пароля
   castDBError $ saveToDb uname pwd
 
 main = case handlerResult of
@@ -244,3 +245,143 @@ main = case handlerResult of
 | C# | ❌ | ⭐ | ✅ |
 | Haskell | ✅ | ❌ | ❌ |
 
+## А где же взять ЯП, с discriminated union'ами, хорошей поддержкой IDE, на котором можно писать без PhD по абстрактной алгебре?
+
+Все слышали, а кто-то даже писал на Kotlin. Вы только посмотрите на страницу [код сниппетов](https://kotlinlang.org/docs/reference/idioms.html), там всё так интуитивно понятно, сразу ощущаешь что пишешь на языке созданном людьми для людей.
+
+И бесплатная версия IntelliJ Idea от JetBrains буквально создана для Kotlin, так что с поддержкой IDE проблем не возникает. Давайте попробуем реализовать нашу задачку:
+```kotlin
+package mypackage
+
+// Импортируем, чтобы можно было использовать `Ok` и `Err` без префикса `Result.`
+import mypackage.Result.*
+
+// Это будет класс `Either` из нашего примера на Haskell
+// Обратите внимание, что `sealed class` в Kotlin работает не так, как в C#
+// Тут `sealed` означает, что все наследники класса известны в compile-time, что и даёт нам discriminated union
+sealed class Result<T, E> {
+    class Ok<T, E>(val v: T) : Result<T, E>();
+    class Err<T, E>(val e: E) : Result<T, E>();
+
+    // Эта функция берёт значение из Ok, и прогоняет его через переданный делегат, который в свою очередь возвращает тоже Result
+    // Err эта функция возвращает как есть
+    // Ok(3).flatMap { Ok(it + 2) } == Ok(5)
+    // Err("WRONG").flatMap { Ok(it + 2) } == Err("WRONG")
+    // Ok(3).flatMap { Err("FAIL") } == Err("FAIL")
+    fun <T1> flatMap(f: (T) -> Result<T1, E>): Result<T1, E> = when (this) {
+        is Ok -> f(this.v)
+        is Err -> Err(this.e)
+    }
+
+    // Эта функция трансформирует значение в Err, а Ok оставляет как есть
+    // Ok(3).mapErr { "TOTAL " + it } == Ok(3)
+    // Err("FAILURE").mapErr { "TOTAL " + it } == Err("TOTAL FAILURE")
+    fun <E1> mapErr(f: (E) -> E1): Result<T, E1> = when (this) {
+        is Ok -> Ok(this.v)
+        is Err -> Err(f(this.e))
+    }
+
+    // Эта функция комбинирует этот результат с другим
+    // Если они оба Ok, то возвращает кортеж с двумя значениями,
+    // если хотя бы один Err - возвращает список со всеми ошибками
+    fun <T1> combineWith(other: Result<T1, E>): Result<Pair<T, T1>, List<E>> = when (this) {
+        is Ok -> when (other) {
+            is Ok -> Ok(Pair(this.v, other.v))
+            is Err -> Err(listOf(other.e))
+        }
+        is Err -> when (other) {
+            is Ok -> Err(listOf(this.e))
+            is Err -> Err(listOf(this.e, other.e))
+        }
+    }
+}
+
+// Тип для ошибки в имени
+enum class UsernameError {
+    TooShort, TooLong
+}
+
+// Тип для самого имени
+class Username private constructor(val value: String) {
+    companion object {
+        fun new(value: String): Result<Username, UsernameError> {
+            if (value.length < 3) return Err(UsernameError.TooShort)
+            if (value.length > 32) return Err(UsernameError.TooLong)
+
+            return Ok(Username(value))
+        }
+    }
+}
+
+// Тип для ошибки в пароле
+enum class PasswordError {
+    TooShort, TooLong
+}
+
+// Тип для самого пароля
+class Password private constructor(val value: String) {
+    companion object {
+        fun new(value: String): Result<Password, PasswordError> {
+            if (value.length < 6) return Err(PasswordError.TooShort)
+            if (value.length > 250) return Err(PasswordError.TooLong)
+
+            return Ok(Password(value))
+        }
+    }
+}
+
+// Тип для ошибки во взаимодействии с БД
+enum class DatabaseError {
+    DuplicateUsername, UnexpectedError
+}
+
+// Функция-заглушка для сохранения в БД
+fun saveToDb(name: Username, password: Password): Result<Unit, DatabaseError> {
+    return Ok(Unit)
+}
+
+// Общий тип для всех ошибок, которые происходят в нашем юзкейсе
+sealed class HandlerError {
+    class UsernameError(e: mypackage.UsernameError) : HandlerError()
+    class PasswordError(e: mypackage.PasswordError) : HandlerError()
+    class DatabaseError(e: mypackage.DatabaseError) : HandlerError()
+}
+
+// Функции-конвертеры для перевода частного типа в общий
+fun toHandlerError(e: UsernameError): HandlerError = HandlerError.UsernameError(e)
+fun toHandlerError(e: PasswordError): HandlerError = HandlerError.PasswordError(e)
+fun toHandlerError(e: DatabaseError): HandlerError = HandlerError.DatabaseError(e)
+
+// Самое мясо
+// Обратите внимание что в Kotlin разрешён shadowing имён переменных -
+// я могу переиспользовать имя переменной сколько угодно раз
+fun createAccount(name: String, password: String): Result<Unit, List<HandlerError>> {
+    val name = Username.new(name).mapErr(::toHandlerError)
+    val password = Password.new(password).mapErr(::toHandlerError)
+
+    return name.combineWith(password).flatMap {
+        val (name, password) = it;
+        saveToDb(name, password).mapErr(::toHandlerError).mapErr(::listOf)
+    }
+}
+
+fun main() {
+    val result = createAccount("John_Doe", "P@ssw0rd!")
+    when (result) {
+        is Ok -> println("User created!")
+        is Err -> println("Errors: ${result.e}")
+    }
+}
+```
+
+Синтаксис оказался очень приятным. Я долго игрался с Kotlin, и уже было думал что наконец нашёл, что мне нужно, пока не попробовал добавить test coverage в проект.
+
+Вещи, которые мы делаем MSBuild'ом и Cake'ом, в мире Kotlin делают при помощи Gradle. Gradle - это система сборки, работающая на JVM и использующая Kotlin в качестве билд скрипта (Можно ещё Groovy).
+
+Вот так выглядит работа с тестами в Gradle-JUnit проекте:
+1. Пишешь тест, запускаешь прогон тестов, все проходят, в консоли написано что всё хорошо
+2. Меняешь код, несколько тестов падают, в консоли тебе пишет что какие-то тесты упали
+3. Ты открываешь браузером сгенерённый html-тест репорт, где написано сколько тестов упали
+4. Какие именно тесты упали ты так же смотришь через другую страничку тест репорта
+
+И именно система билда Gradle как промышленный станда
