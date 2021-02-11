@@ -596,5 +596,111 @@ hash(asPassword(readString(reader))) // Typescript
 | Kotlin | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Typescript | ✅ | ✅ | ✅ | ✅ | ❌ | 
 
-🏆 Синтаксис - **Kotlin**
+🏆 Синтаксис - **Kotlin**  
 🏆 Экосистема и тулчейн - **Typescript**
+
+## We need to go deeper
+
+В поисках того, чтобы мне ещё попробовать, я забрёл в [результаты опроса StackOverflow за 2020 год](https://insights.stackoverflow.com/survey/2020#most-loved-dreaded-and-wanted), а там на первом месте в Most loved languages стоит Rust. Инсталлируем и пробуем:
+
+```rust
+// Эту функцию видим не первый раз
+fn combine_results<T1, T2, E>(r1: Result<T1, E>, r2: Result<T2, E>) -> Result<(T1, T2), Vec<E>> {
+    match (r1, r2) {
+        (Ok(v1), Ok(v2)) => Ok((v1, v2)),
+        (Ok(_), Err(e2)) => Err(vec![e2]),
+        (Err(e1), Ok(_)) => Err(vec![e1]),
+        (Err(e1), Err(e2)) => Err(vec![e1, e2]),
+    }
+}
+
+// Это всё тоже видели
+enum UsernameError {
+    TooShort,
+    TooLong,
+}
+
+struct Username {
+    value: String,
+}
+
+// В Rust методы отдельно, данные отдельно
+impl Username {
+    fn new(value: String) -> Result<Self, UsernameError> {
+        match value.chars().count() {
+            len if len < 3 => Err(UsernameError::TooShort),
+            len if len > 25 => Err(UsernameError::TooLong),
+            _ => Ok(Username { value }),
+        }
+    }
+}
+
+enum PasswordError {
+    TooShort,
+    TooLong,
+}
+
+struct Password {
+    value: String,
+}
+
+impl Password {
+    fn new(value: String) -> Result<Self, PasswordError> {
+        match value.chars().count() {
+            len if len < 3 => Err(PasswordError::TooShort),
+            len if len > 25 => Err(PasswordError::TooLong),
+            _ => Ok(Password { value }),
+        }
+    }
+}
+
+enum DatabaseError {
+    UsernameTaken,
+    UnexpectedError,
+}
+
+fn save_to_db(name: Username, password: Password) -> Result<(), DatabaseError> {
+    Ok(())
+}
+
+// Общий тип ошибки
+enum HandlerError {
+    UsernameError(UsernameError),
+    PasswordError(PasswordError),
+    DatabaseError(DatabaseError),
+}
+
+// Учим частные ошибки превращаться в общий тип
+impl From<UsernameError> for HandlerError {
+    fn from(e: UsernameError) -> Self {
+        HandlerError::UsernameError(e)
+    }
+}
+
+impl From<PasswordError> for HandlerError {
+    fn from(e: PasswordError) -> Self {
+        HandlerError::PasswordError(e)
+    }
+}
+
+impl From<DatabaseError> for Vec<HandlerError> {
+    fn from(e: DatabaseError) -> Self {
+        vec![HandlerError::DatabaseError(e)]
+    }
+}
+
+// Главная функция
+fn createAccount(name: String, password: String) -> Result<(), Vec<HandlerError>> {
+    let name = Username::new(name).map_err(HandlerError::from);
+    let password = Password::new(password).map_err(HandlerError::from);
+
+    let (name, password) = combine_results(name, password)?;
+
+    Ok(save_to_db(name, password)?)
+}
+```
+
+В Rust я нашёл для себя много разных крутых штук:
+* Полиморфизм на трейтах
+* Система овнершипа как замена `GC`/`malloc`
+* Исполняемые тесты из примеров в документации
