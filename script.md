@@ -5,23 +5,19 @@
 [ApiController]
 [Route("/api/v1/[controller]")]
 public class AccountController : ControllerBase {
-    private readonly IDbConnection _db;
+    private readonly IDatabase _db;
 
-    public AccountController(IDbConnection db) {
+    public AccountController(IDatabase db) {
         _db = db;
     }
 
     [HttpPost]
     public async Task<IActionResult> Create(CreateAccountRequest request) {
-        var passwordHash = Argon2.Hash(request.Password);
-
-        await _db.ExecuteAsync("INSERT INTO users (id, name, passwordHash) VALUES (@id, @name, @passwordHash)",
-            new
-            {
-                id = Guid.NewGuid(),
-                name = request.Name,
-                passwordHash
-            });
+        await _db.Save(new {
+            id = Guid.NewGuid(),
+            name = request.Name,
+            password = request.Password
+        });
 
         return Ok();
     }
@@ -29,11 +25,11 @@ public class AccountController : ControllerBase {
 ```
 
 А потом подумал:
-* А что если имя пользователя слишком короткое или слишком длинное? Надо вернуть 400 с понятной ошибкой
-* А что если пароль слишком короткий или слишком длинный? Надо вернуть 400 с понятной ошибкой
+* А что если пароль слишком короткий или слишком длинный? Надо бы вернуть понятную ошибку
+* А что если имя пользователя слишком короткое, слишком длинное, или содержит недопустимые символы? Надо бы вернуть понятную ошибку
 * А если и то и другое невалидно, то надо бы вернуть обе ошибки, а не только первую случившуюся
-* А что если имя пользователя уже занято и вставка в базу упала с нарушением UNIQUE CONSTRAINT? Надо вернуть 400 с понятной ошибкой
-* А что если до базы не смогли достучаться? Надо вернуть 500 с понятной ошибкой
+* А что если имя пользователя уже занято и сохранение в БД упало с нарушением уникального constraint? Надо бы вернуть понятную ошибку
+* А что если до базы не смогли достучаться? Надо вернуть бы 500 с понятной ошибкой
 * Я что, зря всё это DDD читал? Чего у меня одни примитивы?
 
 И переделал:
@@ -41,9 +37,9 @@ public class AccountController : ControllerBase {
 [ApiController]
 [Route("/api/v1/[controller]")]
 public class AccountController : ControllerBase {
-    private readonly IDbConnection _db;
+    private readonly IDatabase _db;
 
-    public AccountController(IDbConnection db) {
+    public AccountController(IDatabase db) {
         _db = db;
     }
 
@@ -80,18 +76,14 @@ public class AccountController : ControllerBase {
             });
         }
 
-        var passwordHash = PasswordHash.Of(password);
-
         try {
-            await _db.ExecuteAsync("INSERT INTO users (id, name, passwordHash) VALUES (@id, @name, @passwordHash)",
-                new
-                {
-                    id = Guid.NewGuid(),
-                    name = username,
-                    passwordHash
-                });
+            await _db.Save(new {
+                id = Guid.NewGuid(),
+                username,
+                password
+            });
         }
-        catch (DuplicateKeyEntryException) {
+        catch (ConstraintViolationException) {
             return BadRequest(new
             {
                 errors = new[]
@@ -128,122 +120,28 @@ public class AccountController : ControllerBase {
 Есть [библиотеки](https://github.com/mcintyre321/OneOf) на гитхабе, которые пытаются закрыть эту дыру имеющимися средствами, но получается, как несложно догадаться, всё равно неуклюже.
 
 ## Промежуточные итоги
-|   | Наличие DU | 
+|   | ![csharp](https://user-images.githubusercontent.com/8256473/124615275-c7d78280-de7d-11eb-93de-8c8ee616579e.jpg) | 
 |---|---|
-| C# | ❌ |
+| Pros |  |
+| Cons | - Нет discriminated union'ов |
 
 ## Так и что делать-то теперь?
 
 Ну, discriminated union'ы, это же функциональная фича, а какой у нас функциональный язык? Правильно, Haskell! Запасаемся мануалами и попробуем:
-```haskell
--- Создаём "класс" для запроса
-data CreateAccountRequest = CreateAccountRequest { username :: String
-                                                 , password :: String
-                                                 } deriving (Show)
 
--- <ТёмнаяФункцинальнаяМагия>
-newtype Validation e r = Validation (Either e r) deriving (Eq, Show, Functor)
+> Здесь была секция про Haskell, но поскольку есть риск потратить на неё очень много времени, я перенёс её в самый конец, а здесь оставил только выводы
 
-instance Monoid m => Applicative (Validation m) where
-  pure = Validation . pure
-  Validation (Left x) <*> Validation (Left y) = Validation (Left (mappend x y))
-  Validation f         <*> Validation r         = Validation (f <*> r)
+Haskell решает нашу проблему, однако имеет свои проблемы:
 
-instance Monoid m => Monad (Validation m) where
-    Validation (Left  l) >>= _ = Validation (Left l)
-    Validation (Right r) >>= k = k r
--- </ТёмнаяФункцинальнаяМагия>
-
--- "класс" имя пользователя
-data Username = Username String deriving (Show)
--- "класс" ошибка в имени пользователя
--- Имена `TooShort` и `TooLong` конфликтуют с такими же именами
--- в `PasswordError`, а я не умею в хаскель и не знаю как их зарезолвить,
--- поэтому просто префикс
-data UsernameError = UNTooShort | UNTooLong deriving (Show)
-
--- Функция `createUsername` принимает строку и возвращает либо ошибку, либо имя
-createUsername :: String -> Either UsernameError Username
-createUsername val
-  | length val < 3  = Left UNTooShort
-  | length val > 25 = Left UNTooLong
-  | otherwise       = Right $ Username val
-
--- Всё то же самое для пароля
-data Password = Password String deriving (Show)
-data PasswordError = PTooShort | PTooLong deriving (Show)
-
-createPassword :: String -> Either PasswordError Password
-createPassword val
-  | length val < 6   = Left PTooShort
-  | length val > 250 = Left PTooLong
-  | otherwise        = Right $ Password val
-
--- "класс" ошибка взаимодействия с БД
-data DatabaseError = UsernameTaken | DbUnavailable deriving (Show)
-
--- функция `saveToDb` принимает имя и пароль, и возвращает либо ошибку, либо `IO ()`
--- `IO ()` это примерно то же самое что `Task<void>`
-saveToDb :: Username -> Password -> Either DatabaseError (IO ())
-saveToDb uname pwd = Right $ print (uname, pwd)
--- Можно раскомментить чтобы проверить что-то, кроме happy path
--- saveToDb uname pwd = Left $ UsernameTaken
--- saveToDb uname pwd = Left $ DbUnavailable
-
--- Для нашего главного метода нам нужен будет общий тип ошибки
--- Создаём тип, который заворачивает ошибку либо имени, либо пароля, либо БД
-data HandlerError =
-  PError PasswordError
-  | UNError UsernameError
-  | DBError DatabaseError
-  deriving (Show)
-
--- Я не умею в хаскель и не знаю как вот это сделать нормально
--- Поэтому у меня 3 одинаковых функции, которые приводят разные ошибки к типу `HandlerError`
--- (и заворачивают в массив)
-castUNError :: Either UsernameError a -> Validation [HandlerError] a
-castUNError (Right v) = Validation $ Right v
-castUNError (Left e) = Validation $ Left $ [UNError e]
-
-castPError :: Either PasswordError a -> Validation [HandlerError] a
-castPError (Right v) = Validation $ Right v
-castPError (Left e) = Validation $ Left $ [PError e]
-
-castDBError :: Either DatabaseError a -> Validation [HandlerError] a
-castDBError (Right v) = Validation $ Right v
-castDBError (Left e) = Validation $ Left $ [DBError e]
-
--- Самое мясо
--- Очень элегантно (не считая castXError) описываем поток данных, а аппликативная валидация
--- за нас решает в какой момент всё пошло не так, и какие ошибки вернуть
-handler :: CreateAccountRequest -> Validation [HandlerError] (IO ())
-handler request = do
-  uname <- castUNError $ createUsername $ username request
-  pwd <- castPError $ createPassword $ password request
-  -- пропустим хэширование пароля
-  castDBError $ saveToDb uname pwd
-
-main = case handlerResult of
-  (Validation (Right io)) -> io
-  (Validation (Left err)) -> print err
-  where
-    request = CreateAccountRequest { username = "John_Doe", password = "P@sw0rd!" } 
-    handlerResult = handler request 
-```
-
-Что можно сказать? Основная логика получилась намного лучше и элегантнее, чем в C#, но, с моей точки зрения, у Haskell две беды:
-
-1. Когнитивная сложность. Катаморфизмы, бифункторы и прочие комонады, это не то, о чём лично мне хочется думать, когда я пишу код. Может это и круто, удобно, и позволяет подобно божеству выражать в коде концепции любой сложности выразительно и немногословно, но это очень сильно задирает порог входа.
-2. Поддержка IDE. Я пробовал несколько вариаций, и Typescript в чистой Visual Studio Code удобнее любой из них
-
-Что у C# по этим параметрам? Когнитивная сложность C# - это как раз то, что мне подходит, а по поддержке IDE - в Omnisharp плохенько, в Visual Studio некроссплатформенно, а в ReSharper за деньги, поэтому просто ✅
+1. Вполне ожидаемо, это когнитивная сложность и порог входа. Чистый функциональный язык заставляет вас начать думать по другому, а я не хочу размышлять в терминах теории категорий (по крайней мере я не нахожу целесообразным инвестировать время, чтобы научиться так размышлять). Верните мне мои переменные и оператор присваивания.
+2. Поддержка IDE. Есть два конкурирующих language server'а (но один вроде как заобсолечен), и оба хуже чем поддержка JS в базовой конфигурации VS Code.
+3. Экосистема и тулчейн. Опять два конкурирующих стандарта организации пакетов (но один вроде как расширяет другой), и оба хуже чем `pip`/`npm`/`cargo`/`gem`/`go`
 
 ## Промежуточные итоги
-
-|   | Наличие DU | Когнитивная сложность | Поддержка IDE
-|---|---|---|---|
-| C# | ❌ | ✅ | ✅ |
-| Haskell | ✅ | ❌ | ❌ |
+|   | ![csharp](https://user-images.githubusercontent.com/8256473/124615275-c7d78280-de7d-11eb-93de-8c8ee616579e.jpg) | ![haskell](https://user-images.githubusercontent.com/8256473/124616578-dffbd180-de7e-11eb-95be-83fc12e1836a.png) |
+|---|---|---|
+| Pros | + Не взрывает мозг<br/>+ Имеет неплохие IDE и тулчейн | + Есть discriminated union'ы |
+| Cons | - Нет discriminated union'ов | - Сложен для неподготовленного рассудка<br/>- Инструментарий мне не понравился |
 
 ## А где же взять ЯП, с discriminated union'ами, хорошей поддержкой IDE, на котором можно писать без PhD по абстрактной алгебре?
 
@@ -757,3 +655,101 @@ where
 * Ждём, пока кто нибудь не придумает Rust Virtual Machine, чтобы иметь возможность разменять перформанс на код попроще
 
 Если кто-то знает какой-то язык, который меня может заинтересовать, то пожалуйста предлагайте
+
+## Код на Haskell
+
+```haskell
+-- Создаём "класс" для запроса
+data CreateAccountRequest = CreateAccountRequest { username :: String
+                                                 , password :: String
+                                                 } deriving (Show)
+
+-- <ТёмнаяФункцинальнаяМагия>
+newtype Validation e r = Validation (Either e r) deriving (Eq, Show, Functor)
+
+instance Monoid m => Applicative (Validation m) where
+  pure = Validation . pure
+  Validation (Left x) <*> Validation (Left y) = Validation (Left (mappend x y))
+  Validation f         <*> Validation r         = Validation (f <*> r)
+
+instance Monoid m => Monad (Validation m) where
+    Validation (Left  l) >>= _ = Validation (Left l)
+    Validation (Right r) >>= k = k r
+-- </ТёмнаяФункцинальнаяМагия>
+
+-- "класс" имя пользователя
+data Username = Username String deriving (Show)
+-- "класс" ошибка в имени пользователя
+-- Имена `TooShort` и `TooLong` конфликтуют с такими же именами
+-- в `PasswordError`, а я не умею в хаскель и не знаю как их зарезолвить,
+-- поэтому просто префикс
+data UsernameError = UNTooShort | UNTooLong deriving (Show)
+
+-- Функция `createUsername` принимает строку и возвращает либо ошибку, либо имя
+createUsername :: String -> Either UsernameError Username
+createUsername val
+  | length val < 3  = Left UNTooShort
+  | length val > 25 = Left UNTooLong
+  | otherwise       = Right $ Username val
+
+-- Всё то же самое для пароля
+data Password = Password String deriving (Show)
+data PasswordError = PTooShort | PTooLong deriving (Show)
+
+createPassword :: String -> Either PasswordError Password
+createPassword val
+  | length val < 6   = Left PTooShort
+  | length val > 250 = Left PTooLong
+  | otherwise        = Right $ Password val
+
+-- "класс" ошибка взаимодействия с БД
+data DatabaseError = UsernameTaken | DbUnavailable deriving (Show)
+
+-- функция `saveToDb` принимает имя и пароль, и возвращает либо ошибку, либо `IO ()`
+-- `IO ()` это примерно то же самое что `Task<void>`
+saveToDb :: Username -> Password -> Either DatabaseError (IO ())
+saveToDb uname pwd = Right $ print (uname, pwd)
+-- Можно раскомментить чтобы проверить что-то, кроме happy path
+-- saveToDb uname pwd = Left $ UsernameTaken
+-- saveToDb uname pwd = Left $ DbUnavailable
+
+-- Для нашего главного метода нам нужен будет общий тип ошибки
+-- Создаём тип, который заворачивает ошибку либо имени, либо пароля, либо БД
+data HandlerError =
+  PError PasswordError
+  | UNError UsernameError
+  | DBError DatabaseError
+  deriving (Show)
+
+-- Я не умею в хаскель и не знаю как вот это сделать нормально
+-- Поэтому у меня 3 одинаковых функции, которые приводят разные ошибки к типу `HandlerError`
+-- (и заворачивают в массив)
+castUNError :: Either UsernameError a -> Validation [HandlerError] a
+castUNError (Right v) = Validation $ Right v
+castUNError (Left e) = Validation $ Left $ [UNError e]
+
+castPError :: Either PasswordError a -> Validation [HandlerError] a
+castPError (Right v) = Validation $ Right v
+castPError (Left e) = Validation $ Left $ [PError e]
+
+castDBError :: Either DatabaseError a -> Validation [HandlerError] a
+castDBError (Right v) = Validation $ Right v
+castDBError (Left e) = Validation $ Left $ [DBError e]
+
+-- Самое мясо
+-- Очень элегантно (не считая castXError) описываем поток данных, а аппликативная валидация
+-- за нас решает в какой момент всё пошло не так, и какие ошибки вернуть
+handler :: CreateAccountRequest -> Validation [HandlerError] (IO ())
+handler request = do
+  uname <- castUNError $ createUsername $ username request
+  pwd <- castPError $ createPassword $ password request
+  -- пропустим хэширование пароля
+  castDBError $ saveToDb uname pwd
+
+main = case handlerResult of
+  (Validation (Right io)) -> io
+  (Validation (Left err)) -> print err
+  where
+    request = CreateAccountRequest { username = "John_Doe", password = "P@sw0rd!" } 
+    handlerResult = handler request 
+```
